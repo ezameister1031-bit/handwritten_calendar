@@ -50,7 +50,7 @@ class GeminiError(RuntimeError):
 
 def make_client(api_key: str) -> genai.Client:
     if not api_key:
-        raise GeminiError("Gemini API キーが設定されていません．サイドバーに入力してください．")
+        raise GeminiError("Gemini API キーが設定されていません．.streamlit/secrets.toml を確認してください．")
     return genai.Client(api_key=api_key)
 
 

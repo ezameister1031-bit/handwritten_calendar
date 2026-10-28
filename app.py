@@ -56,10 +56,16 @@ def _secret_key() -> str:
 
 
 # ------------------------------------------------------------------ サイドバー
-#with st.sidebar:
+with st.sidebar:
     st.header("設定")
-    api_key = st.text_input("Gemini API キー", value=_secret_key() or os.environ.get("GEMINI_API_KEY", ""),
-                            type="password", help="Google AI Studio で発行したキー")
+    # APIキーは画面（ブラウザ）に送らない．secrets.toml / Streamlit Cloud の Secrets / 環境変数から読み込む
+    api_key = _secret_key() or os.environ.get("GEMINI_API_KEY", "")
+    if api_key:
+        st.success("Gemini API キー：設定済み")
+    else:
+        st.error("Gemini API キーが設定されていません．"
+                 ".streamlit/secrets.toml（Streamlit Cloud ではアプリ設定の Secrets）に "
+                 "GEMINI_API_KEY を書いてください．")
     model = st.text_input("モデル名", value=DEFAULT_MODEL,
                           help="エラーになる場合は Google AI Studio で使えるモデル名を確認して変更してください")
     ref_date = st.date_input("基準日（撮影日）", value=date.today(),
@@ -85,13 +91,14 @@ def speak(text: str) -> None:
     if tts_on and ss.spoken_id != ss.speech_id:   # 新しい文のときだけ自動で読み上げる
         auto = "setTimeout(say, 300);"
         ss.spoken_id = ss.speech_id
+    safe_text = json.dumps(text).replace("</", "<\\/")   # </script> での割り込みを防ぐ
     page = f"""
 <div style="font-family:sans-serif;display:flex;gap:10px;align-items:center">
   <button id="b" style="white-space:nowrap;padding:6px 12px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer">▶ 読み上げ</button>
   <span style="font-size:14px;color:#333">{html.escape(text)}</span>
 </div>
 <script>
-const text = {json.dumps(text).replace("</", "<\\/")};
+const text = {safe_text};
 function say() {{
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "ja-JP"; u.rate = {tts_rate};
