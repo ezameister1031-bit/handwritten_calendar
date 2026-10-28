@@ -1,0 +1,4 @@
+.streamlit/secrets.toml
+__pycache__/
+eval/ocr_cache.json
+eval/results.csv

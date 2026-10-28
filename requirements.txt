@@ -1,0 +1,10 @@
+streamlit>=1.50
+google-genai>=1.30
+pydantic>=2
+opencv-python>=4.8
+numpy
+pandas
+pillow
+icalendar>=5
+tzdata
+pytest
