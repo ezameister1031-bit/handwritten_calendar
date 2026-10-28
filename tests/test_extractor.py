@@ -63,6 +63,17 @@ def test_times():
     assert P("10/30 8時 朝練")[1] == time(8, 0)                # 8時は午前のまま
 
 
+def test_spoken_style():
+    # 音声入力（話し言葉）の書き起こし
+    assert P("明日の15時からゼミ") == (date(2026, 10, 29), time(15, 0), None, "ゼミ")
+    assert P("11月5日の1時から2時半までMTG") == (date(2026, 11, 5), time(13, 0), time(14, 30), "MTG")
+    assert P("来週の火曜の3時に歯医者") == (date(2026, 11, 3), time(15, 0), None, "歯医者")
+    assert P("金曜日の夜9時から飲み会") == (date(2026, 10, 30), time(21, 0), None, "飲み会")
+    assert P("あさっての朝7時からバイト") == (date(2026, 10, 30), time(7, 0), None, "バイト")
+    assert P("10/30 午後3時からゼミの予定")[3] == "ゼミ"
+    assert P("11/2 歯医者に行く")[3] == "歯医者に行く"
+
+
 def test_multiline_header():
     lines = ["11/2(月)", "10:00 授業", "15:00", "ゼミ発表", "夕方 買い物", "11/3 祝日"]
     evs = extract_events(lines, REF)

@@ -20,7 +20,7 @@ import calendar_store
 from calendar_export import build_ics
 from corrections import apply_correction
 from extractor import Event, describe_event, extract_events, parse_line
-from ocr_gemini import DEFAULT_MODEL, GeminiError, make_client, ocr_lines, transcribe_audio
+from ocr_gemini import DEFAULT_MODEL, GeminiError, make_client, ocr_lines, transcribe_audio, transcribe_schedule
 from preprocess import decode_image, encode_png, preprocess
 
 try:
@@ -167,17 +167,38 @@ def show_error(e: Exception) -> None:
 
 # ------------------------------------------------------------------ 画面
 st.title("手書きスケジュール → カレンダー登録")
-st.caption("手帳やメモを撮影すると，予定を読み取ってカレンダーに登録します．")
+st.caption("手帳やメモを撮影するか，予定を話すと，予定を読み取ってカレンダーに登録します．")
 
-# ---- ① 画像の入力
-st.subheader("1. 手書きメモの画像")
-mode = st.radio("入力方法", ["カメラで撮影", "画像ファイルを選択"], horizontal=True, label_visibility="collapsed")
+# ---- ① 予定の入力（画像 または 音声）
+st.subheader("1. 予定の入力")
+mode = st.radio("入力方法", ["カメラで撮影", "画像ファイルを選択", "音声で入力"], horizontal=True,
+                label_visibility="collapsed")
 if mode == "カメラで撮影":
     upload = st.camera_input("メモを撮影してください")
-else:
+elif mode == "画像ファイルを選択":
     upload = st.file_uploader("画像ファイル（JPEG / PNG）", type=["jpg", "jpeg", "png"])
+else:
+    upload = st.audio_input("予定を話してください", key="dictation")
+    st.caption("例：「明日の午後3時からゼミ。11月5日の1時から2時半までミーティング。来週の火曜の3時に歯医者。」"
+               "　複数の予定を続けて話せます．")
 
-if st.button("読み取る", type="primary", disabled=upload is None):
+read_clicked = st.button("読み取る", type="primary", disabled=upload is None)
+
+if read_clicked and mode == "音声で入力":
+    try:
+        with st.spinner("Gemini で音声を書き起こしています…"):
+            texts = transcribe_schedule(make_client(api_key), model, upload.getvalue(), upload.type or "audio/wav")
+        lines = [{"text": t, "box_2d": None} for t in texts]
+        events = extract_events(texts, ref_date, tuple(pm_range))
+        ss.update(lines=lines, final_img=None, steps={}, base_events=events,
+                  editor_ver=ss.editor_ver + 1, log=[])
+        ss.speech_id += 1
+        ss.speech = (f"{len(events)}件の予定を聞き取りました。内容を確認してください。"
+                     if events else "予定を聞き取れませんでした。もう一度話してください。")
+    except GeminiError as e:
+        show_error(e)
+
+elif read_clicked:
     try:
         img = decode_image(upload.getvalue())
         res = preprocess(img, do_warp=do_warp, do_shadow=do_shadow, do_binarize=do_bin)
@@ -202,23 +223,28 @@ if ss.steps:
                       width="stretch")
 
 # ---- ② 認識結果
-if ss.final_img is not None:
+from_image = ss.final_img is not None
+if from_image or ss.lines:
     st.subheader("2. 認識結果")
-    used = {e.line_index for e in ss.base_events if e.line_index is not None}
-    c1, c2 = st.columns([1, 1])
-    c1.image(annotate(ss.final_img, ss.lines, used), caption="緑：予定として使った行　灰：使わなかった行",
-             width="stretch")
     rows = []
     for i, ln in enumerate(ss.lines):
         p = parse_line(ln["text"], ref_date, tuple(pm_range))
-        rows.append({"行": i + 1, "認識した文字": ln["text"],
+        rows.append({"行": i + 1, ("認識した文字" if from_image else "書き起こした文"): ln["text"],
                      "抽出した部分": "　".join(f"{k}:{v}" for k, v in p.spans) or "－",
                      "残り（予定名）": p.title or "－"})
-    c2.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    if from_image:
+        used = {e.line_index for e in ss.base_events if e.line_index is not None}
+        c1, c2 = st.columns([1, 1])
+        c1.image(annotate(ss.final_img, ss.lines, used), caption="緑：予定として使った行　灰：使わなかった行",
+                 width="stretch")
+        c2.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    else:
+        st.caption("音声から書き起こした予定")
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 # ---- ③ 確認・修正
 current: list[Event] = []
-if ss.final_img is not None or ss.base_events:
+if ss.final_img is not None or ss.lines or ss.base_events:
     st.subheader("3. 予定の確認・修正")
     st.caption("表のセルをクリックすると直接修正できます．行の追加・削除もできます．")
     edited = st.data_editor(
@@ -256,7 +282,7 @@ if ss.final_img is not None or ss.base_events:
 
         vc1, vc2 = st.columns(2)
         with vc1:
-            audio = st.audio_input("マイクで話す")
+            audio = st.audio_input("マイクで話す", key="correction_audio")
             if audio is not None:
                 data = audio.getvalue()
                 digest = hashlib.md5(data).hexdigest()

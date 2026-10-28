@@ -48,11 +48,17 @@ def normalize(text: str) -> str:
     t = t.replace("〜", "~").replace("～", "~")
     t = re.sub(r"(?<=\d)\s*[ー−–—―]\s*(?=\d)", "-", t)  # 数字の間の長音記号などをハイフンに
     t = re.sub(r"\s+", " ", t)
+    # 「夜9時」「朝9時」のような話し言葉を午前・午後に置き換える
+    t = re.sub(r"(?:夜|晩|夕方)(?=\s*\d{1,2}\s*[時:])", "午後", t)
+    t = re.sub(r"(?:朝)(?=\s*\d{1,2}\s*[時:])", "午前", t)
     return t.strip()
 
 
+_MASK = "\x00"   # 日付・時刻として使った部分を塗りつぶす文字
+
+
 def _mask(text: str, start: int, end: int) -> str:
-    return text[:start] + " " * (end - start) + text[end:]
+    return text[:start] + _MASK * (end - start) + text[end:]
 
 
 # ------------------------------------------------------------------ 日付
@@ -140,8 +146,8 @@ def _find_date(text: str, ref: date) -> tuple[date | None, str, list[tuple[str, 
             # 「火」1文字だけの場合は，前後が空白・行頭行末・数字のときだけ曜日とみなす
             # （「月例会」「火災訓練」などを誤って曜日にしないため）
             s, e = m.start("wd"), m.end("wd")
-            before_ok = s == 0 or text[s - 1] == " "
-            after_ok = e == len(text) or text[e] in " ~0123456789午"
+            before_ok = s == 0 or text[s - 1] in " " + _MASK
+            after_ok = e == len(text) or text[e] in " ~0123456789午" + _MASK
             if not (before_ok and after_ok):
                 continue
         spans.append(("日付", m.group().strip()))
@@ -257,11 +263,23 @@ def _find_time(text: str, pm_range) -> tuple[time | None, time | None, str, list
 _BULLETS = "・･-*+□■○●◯◎☆★→>"
 
 
+# 話し言葉（音声入力）で日付・時刻の前後に残る助詞など．例：「明日の15時からゼミ」→「の」「ゼミ」
+_LEAD_WORDS = re.compile(r"^(?:(?:の|に|は|で|から|まで|より|ごろ|頃|くらい|ぐらい)(?=\s|$)\s*)+")
+_TRAIL_WORDS = re.compile(r"(?:\s*(?:がある|があります|あり|です|の予定|予定|を入れて|入れて|入れといて|をお願い))+$")
+
+
 def _clean_title(text: str) -> str:
     t = re.sub(r"\s+", " ", text).strip()
     t = t.strip(" :;,、。.~-()[]「」『』" + _BULLETS)
     t = re.sub(r"\(\s*\)|\[\s*\]", "", t)   # 中身が消えた括弧
-    return re.sub(r"\s+", " ", t).strip(" :;,、。")
+    t = re.sub(r"\s+", " ", t).strip(" :;,、。")
+    prev = None
+    while prev != t:                              # 「の まで MTG」→「MTG」
+        prev = t
+        t = _LEAD_WORDS.sub("", t).strip(" :;,、。")
+        stripped = _TRAIL_WORDS.sub("", t).strip(" :;,、。")
+        t = stripped or t                         # 予定名が空になる場合は残す
+    return t
 
 
 # ------------------------------------------------------------------ 1行の解析
@@ -269,6 +287,11 @@ def parse_line(text: str, ref: date, pm_range: tuple[int, int] = DEFAULT_PM_RANG
     norm = normalize(text)
     d, rest, s1 = _find_date(norm, ref)
     st, en, rest, s2 = _find_time(rest, pm_range)
+    # 話し言葉で日付・時刻の直後に付く助詞や，時刻の直前の「夜」などを取り除く
+    # 例：「明日の夜7時から飲み会」→ 日付・時刻を除いた残りが「飲み会」になる
+    rest = re.sub(r"(?:夕方|朝|昼|夜|晩)(?=\x00)", "", rest)
+    rest = re.sub(r"\x00+(?:\s*(?:までに|から|まで|より|ごろ|くらい|ぐらい|頃|の|に|は|で)(?![ぁ-ゖ]))*", " ", rest)
+    rest = rest.replace(_MASK, " ")
     return LineParse(date=d, start=st, end=en, title=_clean_title(rest), raw=text, spans=s1 + s2)
 
 

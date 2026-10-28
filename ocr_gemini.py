@@ -41,6 +41,15 @@ BASELINE_PROMPT = """この画像は手書きのスケジュールです．書�
 今日の日付は {today} です．年が書かれていない場合や「明日」「来週火曜」などは，この日付を基準に具体的な日付にしてください．
 時刻は24時間表記（HH:MM）にしてください．"""
 
+DICTATION_PROMPT = """この音声では，日本語で自分の予定を話しています．話された予定を書き起こしてください．
+
+- 予定ごとに1つの文字列に分け，話された順に並べてください．
+- 数字は算用数字で書いてください（例：「じゅうごじ」→「15時」，「さんじはん」→「3時半」，「じゅういちがつ いつか」→「11月5日」）．
+- 「明日」「来週の火曜」などの言葉は，具体的な日付に直さず，話されたとおりに書いてください．
+- 「えー」「あの」などのつなぎ言葉や，「予定を入れて」などの依頼の言葉は省いてください．
+- 予定が話されていない場合は，空の配列を返してください．
+"""
+
 TRANSCRIBE_PROMPT = "この音声は日本語で予定の修正を指示しています．話された内容をそのまま文字に書き起こしてください．書き起こした文だけを返してください．"
 
 
@@ -101,6 +110,23 @@ def transcribe_audio(client: genai.Client, model: str, audio: bytes, mime_type: 
                      [types.Part.from_bytes(data=audio, mime_type=mime_type), TRANSCRIBE_PROMPT],
                      config)
     return (resp.text or "").strip()
+
+
+def transcribe_schedule(client: genai.Client, model: str, audio: bytes, mime_type: str = "audio/wav") -> list[str]:
+    """予定を話した音声を，予定ごとの文字列のリストに書き起こす（音声での予定入力に使用）．"""
+    config = types.GenerateContentConfig(
+        temperature=0,
+        response_mime_type="application/json",
+        response_schema=list[str],
+    )
+    resp = _generate(client, model,
+                     [types.Part.from_bytes(data=audio, mime_type=mime_type), DICTATION_PROMPT],
+                     config)
+    try:
+        data = json.loads(resp.text)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise GeminiError(f"Gemini の応答を読み取れませんでした：{(resp.text or '')[:200]}") from e
+    return [str(x).strip() for x in data if str(x).strip()]
 
 
 def extract_events_baseline(client: genai.Client, model: str, image_png: bytes, today: date) -> list[dict]:
