@@ -8,3 +8,4 @@ pillow
 icalendar>=5
 tzdata
 pytest
+streamlit-calendar>=1.2

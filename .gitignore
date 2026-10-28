@@ -2,3 +2,4 @@
 __pycache__/
 eval/ocr_cache.json
 eval/results.csv
+data/

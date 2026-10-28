@@ -16,11 +16,17 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import calendar_store
 from calendar_export import build_ics
 from corrections import apply_correction
 from extractor import Event, describe_event, extract_events, parse_line
 from ocr_gemini import DEFAULT_MODEL, GeminiError, make_client, ocr_lines, transcribe_audio
 from preprocess import decode_image, encode_png, preprocess
+
+try:
+    from streamlit_calendar import calendar as st_calendar
+except ImportError:          # ライブラリが入っていない場合
+    st_calendar = None
 
 st.set_page_config(page_title="手書きスケジュール → カレンダー", layout="wide")
 
@@ -35,7 +41,9 @@ ss.setdefault("speech", None)        # 読み上げる文
 ss.setdefault("speech_id", 0)        # 読み上げる文の番号（新しい文だけ自動で読み上げる）
 ss.setdefault("spoken_id", 0)
 ss.setdefault("last_audio", None)
-ss.setdefault("ics", None)
+ss.setdefault("cal_ver", 0)          # カレンダーを作り直すときに増やす
+ss.setdefault("highlight_ids", set())  # 直前に登録した予定（色を変えて表示）
+ss.setdefault("cal_initial", None)   # カレンダーで最初に表示する日
 ss.setdefault("log", [])             # 修正の履歴
 
 
@@ -48,7 +56,7 @@ def _secret_key() -> str:
 
 
 # ------------------------------------------------------------------ サイドバー
-with st.sidebar:
+#with st.sidebar:
     st.header("設定")
     api_key = st.text_input("Gemini API キー", value=_secret_key() or os.environ.get("GEMINI_API_KEY", ""),
                             type="password", help="Google AI Studio で発行したキー")
@@ -79,7 +87,7 @@ def speak(text: str) -> None:
         ss.spoken_id = ss.speech_id
     page = f"""
 <div style="font-family:sans-serif;display:flex;gap:10px;align-items:center">
-  <button id="b" style="padding:6px 12px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer">▶ 読み上げ</button>
+  <button id="b" style="white-space:nowrap;padding:6px 12px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer">▶ 読み上げ</button>
   <span style="font-size:14px;color:#333">{html.escape(text)}</span>
 </div>
 <script>
@@ -152,7 +160,7 @@ def show_error(e: Exception) -> None:
 
 # ------------------------------------------------------------------ 画面
 st.title("手書きスケジュール → カレンダー登録")
-st.caption("手帳やメモを撮影すると，予定を読み取ってカレンダー用のファイル（.ics）を作ります．")
+st.caption("手帳やメモを撮影すると，予定を読み取ってカレンダーに登録します．")
 
 # ---- ① 画像の入力
 st.subheader("1. 手書きメモの画像")
@@ -170,7 +178,7 @@ if st.button("読み取る", type="primary", disabled=upload is None):
             lines = ocr_lines(make_client(api_key), model, encode_png(res.final))
         events = extract_events([ln["text"] for ln in lines], ref_date, tuple(pm_range))
         ss.update(lines=lines, final_img=res.final, steps=res.steps, base_events=events,
-                  editor_ver=ss.editor_ver + 1, ics=None, log=[])
+                  editor_ver=ss.editor_ver + 1, log=[])
         if do_warp and not res.paper_found:
             st.info("紙の四隅を検出できなかったため，台形補正は行いませんでした．")
         ss.speech_id += 1
@@ -234,7 +242,7 @@ if ss.final_img is not None or ss.base_events:
             new, msg = apply_correction(current[target], command, ref_date, tuple(pm_range))
             updated = list(current)
             updated[target] = new
-            ss.update(base_events=updated, editor_ver=ss.editor_ver + 1, speech=msg, ics=None,
+            ss.update(base_events=updated, editor_ver=ss.editor_ver + 1, speech=msg,
                       speech_id=ss.speech_id + 1)
             ss.log.append(f"「{command}」→ {msg}")
             st.rerun()
@@ -268,17 +276,84 @@ if current:
     st.subheader("4. カレンダーに登録")
     targets = [e for e in current if e.register and e.date]
     st.write(f"登録する予定：{len(targets)}件")
-    if st.button("カレンダー用ファイル（.ics）を作成", type="primary", disabled=not targets):
-        ss.ics = build_ics(current)
-        names = "。".join(describe_event(e, for_speech=True) for e in targets[:5])
+    if st.button("カレンダーに登録", type="primary", disabled=not targets):
+        added, skipped = calendar_store.add(current)
+        ss.highlight_ids = {i for i, _ in added}
+        ss.cal_initial = min(e.date for e in targets).isoformat()   # 登録した月を表示する
+        ss.cal_ver += 1
         ss.speech_id += 1
-        ss.speech = f"{names}。以上{len(targets)}件を登録しました。"
-    if ss.ics:
-        st.download_button("ダウンロード（schedule.ics）", ss.ics, file_name="schedule.ics", mime="text/calendar")
-        st.caption("Google カレンダー：設定 → インポート/エクスポート → ファイルを選択 → インポート．"
-                   "iPhone・Outlook ではファイルを開くと取り込めます．")
+        if added:
+            names = "。".join(describe_event(e, for_speech=True) for _, e in added[:5])
+            ss.speech = f"{names}。以上{len(added)}件をカレンダーに登録しました。"
+            if skipped:
+                ss.speech += f"{skipped}件は登録済みのため追加しませんでした。"
+        else:
+            ss.speech = "すべて登録済みの予定でした。"
 
 # ---- 読み上げ
 if ss.speech:
-    st.divider()
     speak(ss.speech)
+
+# ---- ⑤ カレンダー
+st.subheader("5. カレンダー")
+records = calendar_store.load()
+
+if st_calendar is None:
+    st.warning("カレンダーの表示には streamlit-calendar が必要です．"
+               "`pip install -r requirements.txt` を実行してください．")
+else:
+    st.caption("オレンジ：今回登録した予定　青：以前に登録した予定　（予定をクリックすると詳細と削除ボタンが表示されます）")
+    options = {
+        "initialView": "dayGridMonth",
+        "initialDate": ss.cal_initial or ref_date.isoformat(),
+        "locale": "ja",
+        "headerToolbar": {"left": "prev,next today", "center": "title",
+                          "right": "dayGridMonth,timeGridWeek,listMonth"},
+        "buttonText": {"today": "今日", "month": "月", "week": "週", "list": "一覧"},
+        "height": 680,
+        "dayMaxEvents": 3,
+        "nowIndicator": True,
+        "slotMinTime": "06:00:00",
+        "eventTimeFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
+        "slotLabelFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
+        "allDayText": "終日",
+        "noEventsText": "予定はありません",
+    }
+    state = st_calendar(
+        events=calendar_store.to_fullcalendar(records, ss.highlight_ids),
+        options=options,
+        custom_css=".fc-event-title, .fc-event-time { font-size: 0.85em; } .fc-toolbar-title { font-size: 1.3em; }",
+        callbacks=["eventClick"],
+        key=f"calendar_{ss.cal_ver}",
+    )
+
+    # 予定をクリックしたときの詳細表示
+    clicked = (state or {}).get("eventClick", {}).get("event") if (state or {}).get("callback") == "eventClick" else None
+    rec = next((r for r in records if clicked and r["id"] == clicked.get("id")), None)
+    if rec:
+        ev = calendar_store.to_events([rec])[0]
+        with st.container(border=True):
+            st.markdown(f"**{html.escape(rec['title'])}**　{describe_event(ev).split('、')[0]}")
+            if rec.get("source"):
+                st.caption(f"手書きメモの元の行：{rec['source']}")
+            if st.button("この予定を削除"):
+                calendar_store.delete(rec["id"])
+                ss.cal_ver += 1
+                ss.speech_id += 1
+                ss.speech = f"{rec['title']}を削除しました。"
+                st.rerun()
+
+c1, c2 = st.columns(2)
+with c1:
+    st.download_button(f"すべての予定を .ics で書き出す（{len(records)}件）",
+                       build_ics(calendar_store.to_events(records)) if records else b"",
+                       file_name="schedule.ics", mime="text/calendar", disabled=not records,
+                       help="Google カレンダー・iPhone・Outlook に取り込めるファイルです")
+with c2:
+    with st.popover("すべての予定を削除", disabled=not records):
+        st.write("カレンダーの予定をすべて削除します．元に戻せません．")
+        if st.button("削除する", type="primary"):
+            calendar_store.clear()
+            ss.update(cal_ver=ss.cal_ver + 1, highlight_ids=set(), speech_id=ss.speech_id + 1,
+                      speech="カレンダーの予定をすべて削除しました。")
+            st.rerun()
